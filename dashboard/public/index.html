@@ -43,7 +43,7 @@
     <dt>KAFKA_FAULT</dt>
     <dd>터미널에서 <code>docker stop kafka</code>로 브로커를 내립니다. 브로커 다운 시 Kafka 파이프라인은 DIRECT DB INSERT 모드로 전환됩니다.</dd>
     <dt>DB_FAULT AND KAFKA_FAULT</dt>
-    <dd>DB와 Kafka가 동시에 장애 상태일 경우, Kafka 파이프라인도 로그 수집에 실패합니다.</dd>
+    <dd>DB와 Kafka가 동시에 장애 상태인 동안에는 Producer fallback도 실패하여 FAIL로 집계됩니다. 이후 Kafka만 먼저 복구되면 메시지는 Kafka에 적재되어 PENDING으로 전환되고, DB 복구 시 순차 재처리됩니다.</dd>
   </dl>
 </div>
 

@@ -14,7 +14,7 @@ const GROUP_ID = 'log-consumer';
 const FAULT_CHANNEL = 'fault:events';
 
 const TRANSIENT_GROUP_ERROR_RE = /coordinator is not aware of this member|group is rebalancing|not coordinator|unknown member/i;
-const TRANSIENT_CONN_ERROR_RE = /econnrefused|connection error|etimedout|enotfound|request timed out/i;
+const TRANSIENT_CONN_ERROR_RE = /econnrefused|connection error|etimedout|enotfound|request timed out|dashboard post failed/i;
 
 function nowStr() {
   const d = new Date();
@@ -139,6 +139,53 @@ function httpPost(url, body) {
   });
 }
 
+function httpPostStrict(url, body, timeoutMs = 1000) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const data = JSON.stringify(body);
+    const req = http.request({
+      hostname: parsed.hostname,
+      port: parsed.port || 80,
+      path: parsed.pathname,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data),
+      },
+      timeout: timeoutMs,
+    }, (res) => {
+      res.resume();
+      const code = res.statusCode || 0;
+      if (code >= 200 && code < 300) {
+        resolve();
+      } else {
+        reject(new Error(`dashboard post failed: ${code}`));
+      }
+    });
+
+    req.on('timeout', () => {
+      req.destroy(new Error('dashboard post failed: timeout'));
+    });
+    req.on('error', (err) => reject(err));
+    req.write(data);
+    req.end();
+  });
+}
+
+async function postKafkaEventWithRetry(payload, maxAttempts = 5) {
+  let lastErr;
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      await httpPostStrict(`${DASHBOARD_URL}/api/event/kafka`, payload, 1200);
+      return;
+    } catch (err) {
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, 120 * (i + 1)));
+    }
+  }
+  throw new Error(`dashboard post failed: ${getErrMessage(lastErr)}`);
+}
+
 function pushStatus(ok) {
   httpPost(`${DASHBOARD_URL}/api/consumer-status`, { kafkaOk: ok }).catch(() => {});
 }
@@ -164,7 +211,7 @@ async function processMessage(event, recovered = false) {
     JSON.stringify({ ...event, source: 'kafka' }),
   );
 
-  await httpPost(`${DASHBOARD_URL}/api/event/kafka`, {
+  await postKafkaEventWithRetry({
     producerId,
     ts,
     timeStr,
@@ -288,7 +335,17 @@ async function main() {
           return;
         }
 
+        let event;
+        try {
+          event = JSON.parse(message.value.toString());
+        } catch (parseErr) {
+          console.error(`[${nowStr()}] [Consumer] invalid message skipped: ${parseErr.message}`);
+          await consumer.commitOffsets([{ topic, partition, offset: String(Number(message.offset) + 1) }]);
+          return;
+        }
+
         let waitedForDbFaultClear = false;
+        let pendingNotified = false;
         while (true) {
           const completedAtDuringWait = await getCompletedAt();
           if (completedAtDuringWait) {
@@ -302,6 +359,18 @@ async function main() {
           if (!waitedForDbFaultClear) {
             waitedForDbFaultClear = true;
             console.log(`[${nowStr()}] [Consumer] waiting for DB fault clear (pending)...`);
+          }
+
+          if (!pendingNotified) {
+            await postKafkaEventWithRetry({
+              producerId: event.producerId,
+              ts: event.ts,
+              timeStr: event.timeStr,
+              pending: true,
+              dbOk: false,
+              queuedFromFault: true,
+            });
+            pendingNotified = true;
           }
 
           await waitForFaultClearSignal();
@@ -322,16 +391,7 @@ async function main() {
           }
         }
 
-        let event;
-        try {
-          event = JSON.parse(message.value.toString());
-        } catch (parseErr) {
-          console.error(`[${nowStr()}] [Consumer] invalid message skipped: ${parseErr.message}`);
-          await consumer.commitOffsets([{ topic, partition, offset: String(Number(message.offset) + 1) }]);
-          return;
-        }
-
-        const recovered = event.dbFaultAtProduce === true || event.directOk === false || waitedForDbFaultClear;
+        const recovered = event.dbFaultAtProduce === true || event.directOk === false || waitedForDbFaultClear || pendingNotified;
         await processMessage(event, recovered);
         await consumer.commitOffsets([{ topic, partition, offset: String(Number(message.offset) + 1) }]);
       } catch (e) {
