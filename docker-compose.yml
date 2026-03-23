@@ -1,0 +1,120 @@
+version: '3.8'
+
+networks:
+  kafka-net:
+    driver: bridge
+
+services:
+  kafka:
+    image: apache/kafka:3.8.1
+    container_name: kafka
+    hostname: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      TZ: Asia/Seoul
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID}
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx384m"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - kafka-net
+
+  redis:
+    image: redis:7.2.5-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    environment:
+      TZ: Asia/Seoul
+    networks:
+      - kafka-net
+
+  producer-1:
+    build: ./producer
+    image: kafka-log-reliability/producer:local
+    container_name: producer-1
+    environment:
+      TZ: Asia/Seoul
+      PRODUCER_ID: "1"
+      KAFKA_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      DASHBOARD_URL: http://dashboard:3000
+    depends_on: [kafka, redis]
+    networks:
+      - kafka-net
+    restart: unless-stopped
+
+  producer-2:
+    image: kafka-log-reliability/producer:local
+    container_name: producer-2
+    environment:
+      TZ: Asia/Seoul
+      PRODUCER_ID: "2"
+      KAFKA_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      DASHBOARD_URL: http://dashboard:3000
+    depends_on: [kafka, redis]
+    networks:
+      - kafka-net
+    restart: unless-stopped
+
+  producer-3:
+    image: kafka-log-reliability/producer:local
+    container_name: producer-3
+    environment:
+      TZ: Asia/Seoul
+      PRODUCER_ID: "3"
+      KAFKA_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      DASHBOARD_URL: http://dashboard:3000
+    depends_on: [kafka, redis]
+    networks:
+      - kafka-net
+    restart: unless-stopped
+
+  consumer:
+    build: ./consumer
+    image: kafka-log-reliability/consumer:local
+    container_name: consumer
+    environment:
+      TZ: Asia/Seoul
+      KAFKA_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      DASHBOARD_URL: http://dashboard:3000
+    depends_on: [kafka, redis]
+    networks:
+      - kafka-net
+    restart: unless-stopped
+
+  dashboard:
+    build: ./dashboard
+    image: kafka-log-reliability/dashboard:local
+    container_name: dashboard
+    ports:
+      - "8080:3000"
+    environment:
+      TZ: Asia/Seoul
+      KAFKA_BROKERS: kafka:9092
+      REDIS_HOST: redis
+    depends_on: [kafka, redis]
+    networks:
+      - kafka-net
+    restart: unless-stopped
+
+volumes:
+  kafka-data:

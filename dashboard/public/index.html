@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>로그 파이프라인 대시보드</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/chart.min.js"></script>
+</head>
+<body>
+
+<div id="overlay"></div>
+
+<!-- ── Result Modal ── -->
+<div id="modal-result" class="modal">
+  <button class="modal-close" onclick="closeModal('result')">✕</button>
+  <h3 class="modal-title">SYSTEM AUDIT REPORT</h3>
+  <div class="charts-grid">
+    <div class="chart-wrap">
+      <div class="chart-label">01. 직접 DB 적재</div>
+      <canvas id="chart-direct"></canvas>
+    </div>
+    <div class="chart-wrap">
+      <div class="chart-label">02. Kafka 파이프라인</div>
+      <canvas id="chart-kafka"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- ── Help Modal ── -->
+<div id="modal-help" class="modal">
+  <button class="modal-close" onclick="closeModal('help')">✕</button>
+  <h3 class="modal-title">사용 방법</h3>
+  <dl class="help-list">
+    <dt>START ENGINE / STOP ENGINE</dt>
+    <dd>프로듀서를 시작·정지합니다. 1,000건 누적 시 자동 종료되며 통계 리포트가 표시됩니다.</dd>
+    <dt>RESET</dt>
+    <dd>완료 후 나타나는 버튼입니다. 모든 카운트와 로그를 초기화합니다.</dd>
+    <dt>PRODUCER_INTERVAL</dt>
+    <dd>이벤트 발생 간격입니다. 10ms ~ 3,000ms 범위에서 설정합니다.</dd>
+    <dt>DB_FAULT</dt>
+    <dd>Redis 장애를 발생시킵니다. 직접 DB 적재는 즉시 실패, Kafka 파이프라인은 PENDING 후 복구 시 재처리됩니다.</dd>
+    <dt>KAFKA_FAULT</dt>
+    <dd>터미널에서 <code>docker stop kafka</code>로 브로커를 내립니다. 브로커 다운 시 Kafka 파이프라인은 DIRECT DB INSERT 모드로 전환됩니다.</dd>
+    <dt>DB_FAULT AND KAFKA_FAULT</dt>
+    <dd>DB와 Kafka가 동시에 장애 상태일 경우, Kafka 파이프라인도 로그 수집에 실패합니다.</dd>
+  </dl>
+</div>
+
+<!-- ── App ── -->
+<div id="app">
+
+  <header>
+    <div class="title-block">
+      <div class="title-row">
+        <h1 class="title">로그 파이프라인 대시보드</h1>
+        <button class="btn-help" onclick="openModal('help')" title="사용 방법">?</button>
+      </div>
+      <p class="subtitle">직접 DB 적재 vs. Kafka 분산 메시지 버스 — 안정성 비교 분석</p>
+    </div>
+    <div class="controls">
+      <button id="btn-dbfault" class="btn" disabled onclick="toggleDbFault()">DB_FAULT</button>
+      <button id="btn-engine" class="btn" disabled onclick="handleEngine()">START ENGINE</button>
+    </div>
+  </header>
+
+  <div class="cluster-bar">
+    <div class="slider-group">
+      <span class="slider-label">PRODUCER_INTERVAL</span>
+      <input type="range" id="speed-slider" min="100" max="3000" step="10" value="100" oninput="handleSpeedChange(+this.value)">
+      <span id="speed-val" class="slider-val">100ms</span>
+    </div>
+    <div class="health-group">
+      <span class="health-label">HEALTH_STATUS</span>
+      <span id="sys-status" class="sys-status status-init">INITIALIZING</span>
+      <button id="btn-report" class="btn btn-report" style="display:none" onclick="openModal('result')">AUDIT REPORT ↗</button>
+    </div>
+  </div>
+
+  <div id="content">
+    <div id="grid">
+      <div class="panel">
+        <h2 class="panel-label">01. 직접 DB 적재</h2>
+        <div id="con-direct" class="console"></div>
+        <div class="metrics">
+          <div>SUCCESS<br><b id="m-dirs">0</b></div>
+          <div>FAIL<br><b id="m-dirf" class="val-err">0</b></div>
+          <div>TOTAL<br><b id="m-total">0 / 1000</b></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2 class="panel-label">02. Kafka 파이프라인</h2>
+        <div id="con-kafka" class="console"></div>
+        <div class="metrics">
+          <div>SUCCESS<br><b id="m-kafs">0</b></div>
+          <div>DIRECT DB<br><b id="m-kafd">0</b></div>
+          <div>PENDING<br><b id="m-kafp" class="val-warn">0</b></div>
+          <div>FAIL<br><b id="m-kaff" class="val-err">0</b></div>
+          <div>TOTAL<br><b id="m-total2">0 / 1000</b></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="status-area">
+      <span class="status-section-label">SYSTEM LOG</span>
+      <div id="event-log"></div>
+    </div>
+  </div>
+
+</div><!-- #app -->
+
+<div id="conn-badge">CONNECTING...</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

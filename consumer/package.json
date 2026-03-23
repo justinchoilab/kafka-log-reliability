@@ -1,0 +1,10 @@
+{
+  "name": "kafka-consumer",
+  "version": "1.0.0",
+  "main": "src/consumer.js",
+  "dependencies": {
+    "express": "^4.19.2",
+    "kafkajs": "^2.2.4",
+    "ioredis": "^5.3.2"
+  }
+}
