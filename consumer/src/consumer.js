@@ -221,6 +221,79 @@ async function processMessage(event, recovered = false) {
   });
 }
 
+// ── In-memory processing queue ─────────────────────────────────────────
+// eachMessage는 즉시 commit 후 여기에 적재, worker가 순차 처리
+const processingQueue = [];
+let workerActive = false;
+
+async function handleQueuedEvent(event, messageTimestamp) {
+  const completedAt = await getCompletedAt();
+  if (completedAt) return;
+
+  const skipUntil = await getSkipUntil();
+  if (skipUntil && Number(messageTimestamp) < Number(skipUntil)) return;
+
+  let waitedForDbFaultClear = false;
+  let pendingNotified = false;
+
+  while (true) {
+    const completedAtDuringWait = await getCompletedAt();
+    if (completedAtDuringWait) return;
+
+    const dbFault = await redis.get('fault:db').catch(() => null);
+    if (!dbFault) break;
+
+    if (!waitedForDbFaultClear) {
+      waitedForDbFaultClear = true;
+      console.log(`[${nowStr()}] [Consumer] waiting for DB fault clear (pending)...`);
+    }
+
+    if (!pendingNotified) {
+      await postKafkaEventWithRetry({
+        producerId: event.producerId,
+        ts: event.ts,
+        timeStr: event.timeStr,
+        pending: true,
+        dbOk: false,
+        queuedFromFault: true,
+      });
+      pendingNotified = true;
+    }
+
+    // heartbeat 불필요: eachMessage가 이미 리턴했으므로 KafkaJS가 자체적으로 처리
+    await waitForFaultClearSignal();
+  }
+
+  const completedAtAfterWait = await getCompletedAt();
+  if (completedAtAfterWait) return;
+
+  if (waitedForDbFaultClear) {
+    const skipAfter = await getSkipUntil();
+    if (skipAfter && Number(messageTimestamp) < Number(skipAfter)) return;
+  }
+
+  const recovered = event.dbFaultAtProduce === true || event.directOk === false || waitedForDbFaultClear || pendingNotified;
+  await processMessage(event, recovered);
+}
+
+async function runWorker() {
+  if (workerActive) return;
+  workerActive = true;
+  while (processingQueue.length > 0) {
+    const item = processingQueue.shift();
+    try {
+      await handleQueuedEvent(item.event, item.messageTimestamp);
+    } catch (e) {
+      if (isTransientConnError(e)) {
+        logTransientOnce('worker-transient', `[${nowStr()}] [Consumer] worker transient error: ${getErrMessage(e)}`, 3000);
+      } else {
+        console.error(`[${nowStr()}] [Consumer] worker error: ${getErrMessage(e)}`);
+      }
+    }
+  }
+  workerActive = false;
+}
+
 const app = express();
 app.get('/health', (_req, res) => res.json({ ok: true }));
 app.listen(PORT, () => console.log(`[${nowStr()}] Consumer listening on :${PORT}`));
@@ -321,7 +394,7 @@ async function main() {
 
   await consumer.run({
     autoCommit: false,
-    eachMessage: async ({ topic, partition, message, heartbeat }) => {
+    eachMessage: async ({ topic, partition, message }) => {
       try {
         const completedAt = await getCompletedAt();
         if (completedAt) {
@@ -344,61 +417,15 @@ async function main() {
           return;
         }
 
-        let waitedForDbFaultClear = false;
-        let pendingNotified = false;
-        while (true) {
-          const completedAtDuringWait = await getCompletedAt();
-          if (completedAtDuringWait) {
-            await consumer.commitOffsets([{ topic, partition, offset: String(Number(message.offset) + 1) }]);
-            return;
-          }
-
-          const dbFault = await redis.get('fault:db').catch(() => null);
-          if (!dbFault) break;
-
-          if (!waitedForDbFaultClear) {
-            waitedForDbFaultClear = true;
-            console.log(`[${nowStr()}] [Consumer] waiting for DB fault clear (pending)...`);
-          }
-
-          if (!pendingNotified) {
-            await postKafkaEventWithRetry({
-              producerId: event.producerId,
-              ts: event.ts,
-              timeStr: event.timeStr,
-              pending: true,
-              dbOk: false,
-              queuedFromFault: true,
-            });
-            pendingNotified = true;
-          }
-
-          await waitForFaultClearSignal();
-          await heartbeat();
-        }
-
-        const completedAtAfterWait = await getCompletedAt();
-        if (completedAtAfterWait) {
-          await consumer.commitOffsets([{ topic, partition, offset: String(Number(message.offset) + 1) }]);
-          return;
-        }
-
-        if (waitedForDbFaultClear) {
-          const skipAfter = await getSkipUntil();
-          if (skipAfter && Number(message.timestamp) < Number(skipAfter)) {
-            await consumer.commitOffsets([{ topic, partition, offset: String(Number(message.offset) + 1) }]);
-            return;
-          }
-        }
-
-        const recovered = event.dbFaultAtProduce === true || event.directOk === false || waitedForDbFaultClear || pendingNotified;
-        await processMessage(event, recovered);
+        // 즉시 commit 후 worker에 이관 — eachMessage는 블로킹 없이 리턴
         await consumer.commitOffsets([{ topic, partition, offset: String(Number(message.offset) + 1) }]);
+        processingQueue.push({ event, messageTimestamp: message.timestamp });
+        runWorker();
       } catch (e) {
         if (isTransientGroupError(e) || isTransientConnError(e)) {
           logTransientOnce(
             'consumer-message-transient',
-            `[${nowStr()}] [Consumer] transient message/commit error: ${getErrMessage(e)}`,
+            `[${nowStr()}] [Consumer] transient commit error: ${getErrMessage(e)}`,
             3000,
           );
           return;
