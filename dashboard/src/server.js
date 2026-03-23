@@ -39,7 +39,6 @@ const systemEvents  = [];
 
 const producerStatus = {};
 const trackedKafkaPending = new Set();
-const pendingFirstSeenAt = new Map();
 const settledKafkaEvents = new Set();
 const knownKafkaEvents = new Set();
 const emitterIds = ['1', '2', '3'];
@@ -49,7 +48,6 @@ let emissionSlotWinner = null;
 let lastSystemEventKey = '';
 let lastSystemEventAt  = 0;
 let pendingReconcileTimer = null;
-const ORPHAN_PENDING_TIMEOUT_MS = 12000;
 
 function rememberSettledKafkaEvent(key) {
   if (!key) return;
@@ -123,25 +121,8 @@ async function reconcilePendingFromRedis() {
     const exists = Number(results[i]?.[1] || 0) === 1;
     if (exists) {
       if (trackedKafkaPending.delete(key)) {
-        pendingFirstSeenAt.delete(key);
         knownKafkaEvents.delete(key);
         rememberSettledKafkaEvent(key);
-        removed++;
-      }
-      continue;
-    }
-
-    // Recovery window fallback: if a pending key still has no consumer write for long enough,
-    // mark it failed to prevent permanent residual pending entries.
-    const firstSeenAt = pendingFirstSeenAt.get(key) || Date.now();
-    pendingFirstSeenAt.set(key, firstSeenAt);
-    if (!dbFaulted && brokerUp === true && Date.now() - firstSeenAt >= ORPHAN_PENDING_TIMEOUT_MS) {
-      if (trackedKafkaPending.delete(key)) {
-        pendingFirstSeenAt.delete(key);
-        knownKafkaEvents.delete(key);
-        rememberSettledKafkaEvent(key);
-        stats.kafF++;
-        addEvent(`복구 지연으로 orphan pending 정리: ${key} -> FAIL 확정`, 'warn');
         removed++;
       }
     }
@@ -286,7 +267,6 @@ async function processEvent(event) {
     const queuedFromFault = event.dbFaultAtProduce === true;
     if (queuedFromFault && key && !alreadySettled && !trackedKafkaPending.has(key)) {
       trackedKafkaPending.add(key);
-      pendingFirstSeenAt.set(key, Date.now());
       syncPendingCount();
       const kEntry = { type: 'warn', text: `[${ts}]  Kafka ACK OK -> pending (DB fault)  (${pid})` };
       emitLog('kafka', kEntry);
@@ -383,7 +363,6 @@ app.post('/api/event/kafka', (req, res) => {
         knownKafkaEvents.add(key);
         if (!trackedKafkaPending.has(key)) {
           trackedKafkaPending.add(key);
-          pendingFirstSeenAt.set(key, Date.now());
           syncPendingCount();
           newlyTracked = true;
         }
@@ -394,7 +373,6 @@ app.post('/api/event/kafka', (req, res) => {
     } else {
       if (wasPending && key) {
         trackedKafkaPending.delete(key);
-        pendingFirstSeenAt.delete(key);
         syncPendingCount();
       }
       if (key) knownKafkaEvents.delete(key);
@@ -519,7 +497,6 @@ app.post('/api/reset', async (_req, res) => {
     redis.set('consumer:skipUntil', String(Date.now())).catch(() => {});
     Object.assign(stats, { dirS:0, dirF:0, kafS:0, kafD:0, kafP:0, kafF:0, total:0 });
     trackedKafkaPending.clear();
-    pendingFirstSeenAt.clear();
     settledKafkaEvents.clear();
     knownKafkaEvents.clear();
     emissionSlotKey = -1;
