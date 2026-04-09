@@ -7,12 +7,6 @@ Producer 3개가 동일한 이벤트를 **두 경로로 동시에** 저장하고
 
 Producer는 매 tick마다 같은 이벤트를 두 경로로 처리합니다.
 
-```
-[Producer]
-  ├─ ① Direct  ──────────────────────────► Redis (logs:direct)
-  └─ ② Kafka   ──► Kafka topic ──► Consumer ──► Redis (logs:kafka)
-```
-
 | | Direct 경로 | Kafka 경로 |
 |---|---|---|
 | **방식** | Producer가 Redis에 직접 `HSET` | Producer → Kafka → Consumer → Redis |
